@@ -32,9 +32,8 @@ unless defined?(Chef::Provider::Package::Homebrew) && Chef::Platform.find('mac_o
   class Chef
     class Provider
       class Package
-        # Package
         class Homebrew < Package
-          # Homebrew packagex
+
           include Chef::Mixin::ShellOut
           include ::Homebrew::Mixin
 
@@ -47,15 +46,15 @@ unless defined?(Chef::Provider::Package::Homebrew) && Chef::Platform.find('mac_o
           end
 
           def install_package(name, version)
-            brew('install', @new_resource.options, name)
+            brew('install', @new_resource.options, name, version_arg(version))
           end
 
           def upgrade_package(name, version)
-            brew('upgrade', name)
+            brew('upgrade', name, version_arg(version))
           end
 
           def remove_package(name, version)
-            brew('uninstall', @new_resource.options, name)
+            brew('uninstall', @new_resource.options, name, version_arg(version))
           end
 
           # Homebrew doesn't really have a notion of purging, so just remove.
@@ -66,13 +65,17 @@ unless defined?(Chef::Provider::Package::Homebrew) && Chef::Platform.find('mac_o
 
           protected
 
+          def version_arg(version)
+            version.to_s.start_with?('-') ? version : '-v=#{version}'
+          end
+
           def brew(*args)
-            get_response_from_command("brew #{args.join(' ')}")
+            get_response_from_command('brew #{args.join(' ')}')
           end
 
           def current_installed_version
             pkg = get_version_from_formula
-            versions = pkg.to_hash['installed'].map { |v| v['version'] }
+            versions = pkg.to_hash['installed'].map {|v| v['version']}
             versions.join(' ') unless versions.empty?
           end
 
@@ -86,23 +89,45 @@ unless defined?(Chef::Provider::Package::Homebrew) && Chef::Platform.find('mac_o
             version.empty? ? nil : version
           end
 
+          def brew_library_path
+            ::File.join(shell_out!('brew --prefix', :user => homebrew_owner).stdout.chomp, 'Library')
+          end
+
           def get_version_from_formula
-            brew_cmd = shell_out!('brew --prefix', :user => homebrew_owner)
-            libpath = ::File.join(brew_cmd.stdout.chomp, 'Library', 'Homebrew')
-            $LOAD_PATH.unshift(libpath)
+            libpath = ::File.join(brew_library_path, 'Homebrew')
+            $:.unshift(libpath)
 
             require 'global'
             require 'cmd/info'
 
-            Formula[new_resource.package_name]
+            Formula.factory resolved_package_name
+          end
+
+          def resolved_package_name
+            package_name = new_resource.package_name
+
+            # Resolves a strange issue on OSX 10.9 and Chef's Omnibus installer's embedded
+            # Ruby (1.9.3) where it's unable to resolve symlinks with either Pathname or File
+            if Formula.aliases.include? package_name
+              alias_path = ::File.join(brew_library_path, 'Aliases', package_name)
+              formula_path = ::File.expand_path(::File.readlink(alias_path), ::File.dirname(alias_path))
+              formula_name = ::File.basename(formula_path, '.rb')
+
+              Chef::Log.debug 'Resolved alias \'#{package_name}\' to formula \'#{formula_name}\''
+              return formula_name
+            end
+
+            # When it's resolved the Formula#canonical_name method
+            # should be able to resolve aliases as well
+            Formula.canonical_name package_name
           end
 
           def get_response_from_command(command)
             require 'etc'
             home_dir = Etc.getpwnam(homebrew_owner).dir
 
-            Chef::Log.debug "Executing '#{command}' as #{homebrew_owner}"
-            output = shell_out!(command, :user => homebrew_owner, :environment => { 'HOME' => home_dir, 'RUBYOPT' => nil })
+            Chef::Log.debug 'Executing \'#{command}\' as #{homebrew_owner}'
+            output = shell_out!(command, :user => homebrew_owner, :environment => {'HOME' => home_dir})
             output.stdout
           end
         end
